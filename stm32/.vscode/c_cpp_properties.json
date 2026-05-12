@@ -3,11 +3,11 @@
         {
             "name": "Target_1",
             "includePath": [
-                "e:\\A_information\\Competition\\STM32project\\xiaosaiD\\Start",
-                "e:\\A_information\\Competition\\STM32project\\xiaosaiD\\User",
-                "e:\\A_information\\Competition\\STM32project\\xiaosaiD\\Library",
-                "e:\\A_information\\Competition\\STM32project\\xiaosaiD\\System",
-                "e:\\A_information\\Competition\\STM32project\\xiaosaiD\\Hardware",
+                "e:\\A_information\\xiaosaiD\\stm32\\Start",
+                "e:\\A_information\\xiaosaiD\\stm32\\User",
+                "e:\\A_information\\xiaosaiD\\stm32\\Library",
+                "e:\\A_information\\xiaosaiD\\stm32\\System",
+                "e:\\A_information\\xiaosaiD\\stm32\\Hardware",
                 "D:\\Users\\20823\\AppData\\Local\\Keil_v5\\ARM\\ARMCLANG\\include",
                 "D:\\Users\\20823\\AppData\\Local\\Keil_v5\\ARM\\ARMCLANG\\include\\arm_linux",
                 "D:\\Users\\20823\\AppData\\Local\\Keil_v5\\ARM\\ARMCLANG\\include\\arm_linux_compat",

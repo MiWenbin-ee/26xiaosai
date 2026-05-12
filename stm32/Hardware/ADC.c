@@ -90,3 +90,32 @@ float Get_Current_Amps(void)
     
     return current;
 }
+
+void ADC_Pot_Init(void)
+{
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
+
+	GPIO_InitTypeDef GPIO_InitStructure;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_3;
+	GPIO_Init(GPIOA, &GPIO_InitStructure);
+}
+
+float Get_Potentiometer_K(void)
+{
+	uint16_t adc_val = 0;
+	uint8_t i;
+
+	for (i = 0; i < 10; i++)
+	{
+		ADC_RegularChannelConfig(ADC1, ADC_Channel_3, 1, ADC_SampleTime_239Cycles5);
+		ADC_SoftwareStartConvCmd(ADC1, ENABLE);
+		while (ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC) == RESET);
+		adc_val += ADC_GetConversionValue(ADC1);
+	}
+	adc_val /= 10;
+
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_0, 1, ADC_SampleTime_239Cycles5);
+
+	return 0.0001f + ((float)adc_val / 4095.0f) * 0.0049f;
+}

@@ -724,6 +724,16 @@
               <FileType>5</FileType>
               <FilePath>.\Hardware\ADC.h</FilePath>
             </File>
+            <File>
+              <FileName>UART.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\Hardware\UART.c</FilePath>
+            </File>
+            <File>
+              <FileName>UART.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\Hardware\UART.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
