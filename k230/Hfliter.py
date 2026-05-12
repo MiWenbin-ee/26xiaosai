@@ -16,14 +16,15 @@ import sys
 import aidemo
 from machine import UART
 
-# K230 UART parity uses integer values. 0 means no parity.
 UART_PARITY_NONE = 0
 
-# State constants
 STATE_IDLE = 0
 STATE_CALIBRATING = 1
 STATE_WAIT_MEAS = 2
 STATE_MEASURING = 3
+
+CAL_FILE = "/sdcard/app/cal_data.json"
+CAL_TARGETS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100]
 
 
 def init_uart2():
@@ -56,19 +57,14 @@ class SegmentationApp(AIBase):
         self.ai2d = Ai2d(debug_mode)
         self.ai2d.set_ai2d_dtype(nn.ai2d_format.NCHW_FMT, nn.ai2d_format.NCHW_FMT, np.uint8, np.uint8)
 
-        # Distance polynomial coefficients
         self.dist_a = -0.00000873
         self.dist_b = 0.01196712
         self.dist_c = -5.65386753
         self.dist_d = 964.76871412
-
-        # Height calibration coefficient
         self.k_H = 0.00091
 
-        # State machine
         self.state = STATE_IDLE
 
-        # Measurement data collection
         self.meas_buffer_D = []
         self.meas_buffer_H = []
         self.meas_samples_target = 10
@@ -77,10 +73,14 @@ class SegmentationApp(AIBase):
         self.last_D = 0.0
         self.last_H = 0.0
 
-        # Sliding window for smoothing display
         self.window_size = 10
         self.history_bbox = []
         self.history_D = []
+
+        self.cal_targets = CAL_TARGETS
+        self.cal_index = 0
+        self.cal_lut = []
+        self.cal_done = False
 
     def config_preprocess(self, input_image_size=None):
         with ScopedTiming("set preprocess config", self.debug_mode > 0):
@@ -108,6 +108,76 @@ class SegmentationApp(AIBase):
     def compute_H(self, h_pixel, D_real):
         return h_pixel * D_real * self.k_H
 
+    def load_calibration(self):
+        try:
+            with open(CAL_FILE, "r") as f:
+                data = ujson.load(f)
+            self.dist_a = float(data["dist_a"])
+            self.dist_b = float(data["dist_b"])
+            self.dist_c = float(data["dist_c"])
+            self.dist_d = float(data["dist_d"])
+            if "k_H" in data:
+                self.k_H = float(data["k_H"])
+            return True
+        except:
+            return False
+
+    def save_calibration(self):
+        data = {
+            "dist_a": self.dist_a,
+            "dist_b": self.dist_b,
+            "dist_c": self.dist_c,
+            "dist_d": self.dist_d,
+            "k_H": self.k_H
+        }
+        try:
+            with open(CAL_FILE, "w") as f:
+                ujson.dump(data, f)
+        except:
+            pass
+
+    def fit_cubic_poly(self):
+        n = len(self.cal_lut)
+        if n < 4:
+            return False
+
+        A = [[0.0] * 4 for _ in range(4)]
+        B = [0.0] * 4
+
+        for yi, di in self.cal_lut:
+            row = [yi ** 3, yi ** 2, yi, 1.0]
+            for i in range(4):
+                for j in range(4):
+                    A[i][j] += row[i] * row[j]
+                B[i] += row[i] * di
+
+        aug = [A[i] + [B[i]] for i in range(4)]
+
+        for col in range(4):
+            max_row = col
+            for row in range(col + 1, 4):
+                if abs(aug[row][col]) > abs(aug[max_row][col]):
+                    max_row = row
+            aug[col], aug[max_row] = aug[max_row], aug[col]
+
+            pivot = aug[col][col]
+            if abs(pivot) < 1e-15:
+                continue
+            for j in range(col, 5):
+                aug[col][j] /= pivot
+
+            for row in range(4):
+                if row != col:
+                    factor = aug[row][col]
+                    for j in range(col, 5):
+                        aug[row][j] -= factor * aug[col][j]
+
+        self.dist_a = aug[0][4]
+        self.dist_b = aug[1][4]
+        self.dist_c = aug[2][4]
+        self.dist_d = aug[3][4]
+        return True
+
     def check_uart(self, uart):
         if uart is None:
             return
@@ -116,61 +186,93 @@ class SegmentationApp(AIBase):
                 line = uart.readline()
                 if line:
                     cmd = line.decode().strip()
-                    if cmd == "CAL_START":
-                        self.state = STATE_CALIBRATING
-                        self.history_bbox.clear()
-                        self.history_D.clear()
-                    elif cmd == "CAL_END":
-                        self.state = STATE_WAIT_MEAS
-                    elif cmd.startswith("K:"):
-                        self.k_H = float(cmd[2:])
-                    elif cmd == "MEAS_START":
-                        self.state = STATE_MEASURING
-                        self.meas_buffer_D = []
-                        self.meas_buffer_H = []
-                        self.meas_total_frames = 0
-                        self.meas_done = False
-                        self.history_bbox.clear()
-                        self.history_D.clear()
-                    elif cmd == "RET_IDLE":
-                        self.state = STATE_WAIT_MEAS
+                    self._handle_command(cmd)
             except:
                 pass
+
+    def _do_sample(self):
+        idx = self.cal_index
+        if idx >= len(self.cal_targets):
+            return
+        target_dist = self.cal_targets[idx]
+        if len(self.history_bbox) > 0:
+            num = len(self.history_bbox)
+            s_h = int(sum(b[3] for b in self.history_bbox) / num)
+            s_y1 = int(sum(b[1] for b in self.history_bbox) / num)
+            bottom_y = s_y1 + s_h
+        else:
+            bottom_y = 0
+        self.cal_lut.append((float(bottom_y), float(target_dist)))
+        self.cal_index = idx + 1
+        self.history_bbox.clear()
+        self.history_D.clear()
+
+        if self.cal_index >= len(self.cal_targets):
+            ok = self.fit_cubic_poly()
+            if ok:
+                self.save_calibration()
+            self.cal_done = True
+
+    def _handle_command(self, cmd):
+        if cmd == "CAL_START":
+            self.state = STATE_CALIBRATING
+            self.cal_index = 0
+            self.cal_lut = []
+            self.cal_done = False
+            self._do_sample()
+
+        elif cmd == "SAMPLE":
+            if self.state == STATE_CALIBRATING and not self.cal_done:
+                self._do_sample()
+
+        elif cmd == "CAL_END":
+            if self.state == STATE_CALIBRATING:
+                self.state = STATE_WAIT_MEAS
+                self.cal_done = False
+                self.history_bbox.clear()
+                self.history_D.clear()
+
+        elif cmd.startswith("K:"):
+            self.k_H = float(cmd[2:])
+
+        elif cmd == "MEAS_START":
+            self.state = STATE_MEASURING
+            self.meas_buffer_D = []
+            self.meas_buffer_H = []
+            self.meas_total_frames = 0
+            self.meas_done = False
+            self.history_bbox.clear()
+            self.history_D.clear()
+
+        elif cmd == "RET_IDLE":
+            self.state = STATE_WAIT_MEAS
 
     def is_bottle_in_center(self, x, y, w, h):
         cx = x + w / 2
         cy = y + h / 2
         dw = self.display_size[0]
         dh = self.display_size[1]
-        left = dw / 3
-        right = 2 * dw / 3
-        top = dh / 3
-        bottom = 2 * dh / 3
-        return left <= cx <= right and top <= cy <= bottom
+        return (dw / 3 <= cx <= 2 * dw / 3) and (dh / 3 <= cy <= 2 * dh / 3)
 
     def filter_outliers_mad(self, data):
         n = len(data)
         if n < 3:
             return data
-
         sorted_data = sorted(data)
         median_val = sorted_data[n // 2]
-
         abs_dev = [abs(x - median_val) for x in data]
         abs_dev_sorted = sorted(abs_dev)
         mad = abs_dev_sorted[len(abs_dev) // 2]
-
         if mad < 0.0001:
             return data
-
         threshold = 3.0 * mad
         filtered = [x for x in data if abs(x - median_val) <= threshold]
-
         if len(filtered) < 2:
             return data
         return filtered
 
     def _draw_state_indicator(self, pl):
+        dw = self.display_size[0]
         state_names = {STATE_IDLE: "IDLE", STATE_CALIBRATING: "CAL",
                        STATE_WAIT_MEAS: "WAIT", STATE_MEASURING: "MEAS"}
         name = state_names.get(self.state, "???")
@@ -182,8 +284,37 @@ class SegmentationApp(AIBase):
         pl.osd_img.draw_string_advanced(5, 5, 28, "S:" + name, color=color)
 
         if self.state == STATE_CALIBRATING:
-            k_text = "K:%.6f" % self.k_H
-            pl.osd_img.draw_string_advanced(5, 35, 24, k_text, color=(255, 255, 255, 0))
+            if self.cal_done:
+                pl.osd_img.draw_string_advanced(dw // 2 - 80, 160, 40, "CAL COMPLETE!",
+                                                color=(255, 0, 255, 0))
+                s1 = "a=%.2e b=%.4f" % (self.dist_a, self.dist_b)
+                pl.osd_img.draw_string_advanced(dw // 2 - 100, 210, 22, s1,
+                                                color=(255, 255, 255, 0))
+                s2 = "c=%.4f d=%.2f" % (self.dist_c, self.dist_d)
+                pl.osd_img.draw_string_advanced(dw // 2 - 100, 238, 22, s2,
+                                                color=(255, 255, 255, 0))
+                s3 = "K=%.6f" % self.k_H
+                pl.osd_img.draw_string_advanced(dw // 2 - 50, 266, 22, s3,
+                                                color=(255, 255, 255, 0))
+                pl.osd_img.draw_string_advanced(dw // 2 - 100, 300, 28, "Press B1 to finish",
+                                                color=(255, 200, 200, 200))
+            else:
+                idx = self.cal_index
+                if idx < len(self.cal_targets):
+                    target = self.cal_targets[idx]
+                    t1 = "Place @ %d cm" % target
+                    pl.osd_img.draw_string_advanced(dw // 2 - 60, 5, 32, t1,
+                                                    color=(255, 255, 255, 0))
+                prog = "Sampled: %d/%d" % (len(self.cal_lut), len(self.cal_targets))
+                pl.osd_img.draw_string_advanced(dw // 2 - 50, 40, 24, prog,
+                                                color=(255, 0, 255, 0))
+
+                y_off = 70
+                for yi, di in self.cal_lut[-8:]:
+                    entry = " %dcm: y=%d" % (int(di), int(yi))
+                    pl.osd_img.draw_string_advanced(dw - 170, y_off, 20, entry,
+                                                    color=(255, 200, 200, 200))
+                    y_off += 22
 
     def draw_result(self, pl, seg_res, uart):
         with ScopedTiming("display_draw", self.debug_mode > 0):
@@ -207,7 +338,6 @@ class SegmentationApp(AIBase):
                     if class_name == "bottle":
                         bottle_detected = True
 
-                        # Sliding window smoothing
                         self.history_bbox.append([raw_x1, raw_y1, raw_w, raw_h])
                         if len(self.history_bbox) > self.window_size:
                             self.history_bbox.pop(0)
@@ -233,7 +363,16 @@ class SegmentationApp(AIBase):
                         self.last_D = final_D
                         self.last_H = final_H
 
-                        if self.state == STATE_MEASURING:
+                        if self.state == STATE_CALIBRATING:
+                            pl.osd_img.draw_rectangle(s_x1, s_y1, s_w, s_h,
+                                                      color=(255, 0, 255, 0), thickness=2)
+                            pl.osd_img.draw_circle(bottom_x, bottom_y, 8,
+                                                   color=(255, 255, 0, 0), thickness=2, fill=True)
+                            info = "y=%d D=%.1f H=%.1f" % (bottom_y, final_D, final_H)
+                            pl.osd_img.draw_string_advanced(s_x1, s_y1 - 40, 28, info,
+                                                            color=(255, 0, 255, 0))
+
+                        elif self.state == STATE_MEASURING:
                             self.meas_total_frames += 1
                             center_ok = self.is_bottle_in_center(s_x1, s_y1, s_w, s_h)
 
@@ -254,7 +393,6 @@ class SegmentationApp(AIBase):
                                 if progress >= self.meas_samples_target:
                                     fD = self.filter_outliers_mad(self.meas_buffer_D)
                                     fH = self.filter_outliers_mad(self.meas_buffer_H)
-
                                     self.last_D = sum(fD) / len(fD)
                                     self.last_H = sum(fH) / len(fH)
                                     self.meas_done = True
@@ -270,13 +408,12 @@ class SegmentationApp(AIBase):
                                 self.meas_buffer_D = []
                                 self.meas_buffer_H = []
                                 self.meas_done = False
+
                         else:
-                            # IDLE / CALIBRATING / WAIT_MEAS: normal live display
                             pl.osd_img.draw_rectangle(s_x1, s_y1, s_w, s_h,
                                                       color=(255, 0, 255, 0), thickness=2)
                             pl.osd_img.draw_circle(bottom_x, bottom_y, 8,
                                                    color=(255, 255, 0, 0), thickness=2, fill=True)
-
                             text = "D:%.1fcm H:%.1fcm" % (final_D, final_H)
                             pl.osd_img.draw_string_advanced(s_x1, s_y1 - 40, 35, text,
                                                             color=(255, 0, 0, 255))
@@ -355,6 +492,8 @@ if __name__ == "__main__":
                           mask_threshold=mask_threshold, rgb888p_size=rgb888p_size,
                           display_size=display_size, debug_mode=0)
     seg.config_preprocess()
+
+    seg.load_calibration()
 
     try:
         while True:

@@ -24,6 +24,7 @@ int main(void)
 	float last_D = 0.0f, last_H = 0.0f;
 	uint16_t display_ticks = 0;
 	uint16_t meas_timeout = 0;
+	uint8_t cal_sample_count = 0;
 
 	NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
 
@@ -82,31 +83,60 @@ int main(void)
 			{
 				UART1_SendString("CAL_START\n");
 				state = STATE_CALIBRATING;
+				cal_sample_count = 1;
 				OLED_ShowString(1, 1, "State: CALIBRAT ");
-				OLED_ShowString(2, 1, "Adjust pot for K ");
-				OLED_ShowString(3, 1, "KEY1: End Cal   ");
-				OLED_ShowString(4, 1, "                ");
+				OLED_ShowString(2, 1, "50cm sampled    ");
+				OLED_ShowString(3, 1, "Next: 55cm      ");
+				OLED_ShowString(4, 1, "Done: 1/11      ");
 				LED1_ON();
 			}
 			break;
 
 		case STATE_CALIBRATING:
-			{
-				float k_H = Get_Potentiometer_K();
-				sprintf(display_buf, "K:%.6f       ", k_H);
-				OLED_ShowString(4, 1, display_buf);
-				sprintf(display_buf, "K:%.6f\n", k_H);
-				UART1_SendString(display_buf);
-			}
 			if (key == 1)
 			{
-				UART1_SendString("CAL_END\n");
-				state = STATE_WAIT_MEAS;
-				OLED_ShowString(1, 1, "State: WAITING  ");
-				OLED_ShowString(2, 1, "KEY2: Measure   ");
-				OLED_ShowString(3, 1, "                ");
-				OLED_ShowString(4, 1, "                ");
-				LED1_OFF();
+				if (cal_sample_count < 11)
+				{
+					UART1_SendString("SAMPLE\n");
+					cal_sample_count++;
+
+					if (cal_sample_count <= 11)
+					{
+						uint16_t dist = 50 + (cal_sample_count - 1) * 5;
+						sprintf(display_buf, "%dcm sampled    ", dist);
+						OLED_ShowString(2, 1, display_buf);
+
+						if (cal_sample_count < 11)
+						{
+							uint16_t next = dist + 5;
+							sprintf(display_buf, "Next: %dcm      ", next);
+							OLED_ShowString(3, 1, display_buf);
+						}
+						else
+						{
+							OLED_ShowString(3, 1, "All points done ");
+						}
+
+						sprintf(display_buf, "Done: %d/11     ", cal_sample_count);
+						OLED_ShowString(4, 1, display_buf);
+					}
+				}
+
+				if (cal_sample_count >= 11)
+				{
+					OLED_ShowString(2, 1, "Computing...    ");
+					OLED_ShowString(3, 1, "Saving coeffs   ");
+					OLED_ShowString(4, 1, "                ");
+					Delay_ms(500);
+					UART1_SendString("CAL_END\n");
+					state = STATE_WAIT_MEAS;
+					cal_sample_count = 0;
+					OLED_ShowString(1, 1, "State: WAITING  ");
+					OLED_ShowString(2, 1, "KEY2: Measure   ");
+					OLED_ShowString(3, 1, "                ");
+					OLED_ShowString(4, 1, "                ");
+					LED1_OFF();
+				}
 			}
 			break;
 
