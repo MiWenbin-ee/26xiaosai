@@ -86,7 +86,7 @@ float Get_Current_Amps(void)
     
     // 2. 根据 INA270 公式反推电流: Vout = I * Rs * 14
     // 所以 I = Vout / (Rs * 14)
-    float current = vout / (0.1f * 14.0f); 
+    float current = vout / (0.1f * 15.9f); 
     
     return current;
 }

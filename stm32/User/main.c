@@ -6,203 +6,253 @@
 #include "LED.h"
 #include "UART.h"
 #include <stdio.h>
+#include <string.h>
 
 enum {
-	STATE_IDLE,
-	STATE_CALIBRATING,
-	STATE_WAIT_MEAS,
-	STATE_MEASURING,
-	STATE_DISPLAY
+    STATE_IDLE,
+    STATE_CALIBRATING,
+    STATE_WAIT_MEAS,
+    STATE_MEASURING,
+    STATE_DISPLAY
 };
+
+// ========================================================
+// 电流 2 秒滑动平均滤波算法 (主循环100ms x 20次 = 2秒)
+// ========================================================
+#define CURRENT_SAMPLES 20
+float current_buf[CURRENT_SAMPLES] = {0};
+uint8_t current_idx = 0;
+uint8_t current_filled = 0;
+
+float Get_Averaged_Current(void)
+{
+    // 获取瞬时电流 (假设你的 ADC.h 里有这个函数)
+    float raw_c = Get_Current_Amps(); 
+    
+    // 装入环形缓冲区
+    current_buf[current_idx] = raw_c;
+    current_idx = (current_idx + 1) % CURRENT_SAMPLES;
+    if (current_filled < CURRENT_SAMPLES) current_filled++;
+
+    // 计算这2秒内的平均值
+    float sum = 0;
+    for (int i = 0; i < current_filled; i++) {
+        sum += current_buf[i];
+    }
+    return sum / current_filled;
+}
+
+// 刷新第一行：实时动态显示 2 秒平滑后的电流与功率
+static void OLED_ShowPowerLine(void)
+{
+    char buf[17];
+    float avg_current = Get_Averaged_Current();
+    float avg_power = 5.0f * avg_current; // 假设系统为 5V 供电
+    
+    int len = sprintf(buf, "I:%.2fA P:%.1fW", avg_current, avg_power);
+    // 补齐空格，彻底清除上一帧的残影
+    while (len < 16) buf[len++] = ' ';
+    buf[16] = '\0';
+    OLED_ShowString(1, 1, buf);
+}
 
 int main(void)
 {
-	uint8_t state = STATE_IDLE;
-	uint8_t key;
-	char rx_buf[32];
-	char display_buf[24];
-	float last_D = 0.0f, last_H = 0.0f, last_L = 0.0f;
-	uint16_t display_ticks = 0;
-	uint16_t meas_timeout = 0;
-	uint8_t cal_sample_count = 0;
+    uint8_t state = STATE_IDLE;
+    uint8_t key;
+    char rx_buf[64];
+    char display_buf[24];
+    
+    float last_D = 0.0f, last_H = 0.0f, last_L = 0.0f;
+    int last_C = 0;
+    
+    uint16_t display_ticks = 0;
+    uint16_t meas_timeout = 0;
+    uint8_t cal_sample_count = 0;
 
-	NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
+    NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
 
-	OLED_Init();
-	LED_Init();
-	Key_Init();
-	ADCDMA_Init();
-	ADC_Pot_Init();
-	UART1_Init(115200);
+    OLED_Init();
+    LED_Init();
+    Key_Init();
+    ADCDMA_Init();
+    ADC_Pot_Init();
+    UART1_Init(115200);
 
-	LED1_OFF();
-	LED2_OFF();
+    LED1_OFF();
+    LED2_OFF();
 
-	OLED_ShowString(1, 1, "State: IDLE     ");
-	OLED_ShowString(2, 1, "KEY1: Calibrate ");
-	OLED_ShowString(3, 1, "                ");
-	OLED_ShowString(4, 1, "                ");
+    // 开机初始界面 (只管 2 3 4 行，第 1 行由死循环接管)
+    OLED_ShowString(2, 1, "State: IDLE     ");
+    OLED_ShowString(3, 1, "K1: Calibrate   ");
+    OLED_ShowString(4, 1, "K2: Measure     ");
 
-	while (1)
-	{
-		key = Key_GetNum();
+    while (1)
+    {
+        // 【核心】：不管板子在干嘛，第 1 行永远在实时刷新 2 秒平均功率！
+        OLED_ShowPowerLine();
 
-		if (UART1_GetRxFlag())
-		{
-			UART1_GetRxLine(rx_buf);
-			UART1_ClearRxFlag();
+        key = Key_GetNum();
 
-			if (state == STATE_MEASURING)
-			{
-				float d, h, l;
-				if (sscanf(rx_buf, "D:%f,H:%f,L:%f", &d, &h, &l) == 3)
-				{
-					last_D = d;
-					last_H = h;
-					last_L = l;
-					state = STATE_DISPLAY;
-					display_ticks = 0;
-					meas_timeout = 0;
+        if (UART1_GetRxFlag())
+        {
+            UART1_GetRxLine(rx_buf);
+            UART1_ClearRxFlag();
 
-					OLED_ShowString(1, 1, "State: RESULT   ");
-					sprintf(display_buf, "D: %.1f cm     ", last_D);
-					OLED_ShowString(2, 1, display_buf);
-					sprintf(display_buf, "H: %.1f cm     ", last_H);
-					OLED_ShowString(3, 1, display_buf);
-					sprintf(display_buf, "L: %.1f cm     ", last_L);
-					OLED_ShowString(4, 1, display_buf);
+            if (state == STATE_MEASURING)
+            {
+                float d, h, l;
+                int c;
+                // 完美匹配 K230 发送格式：D:xx,H:xx,L:xx,C:xx
+                if (sscanf(rx_buf, "D:%f,H:%f,L:%f,C:%d", &d, &h, &l, &c) >= 3)
+                {
+                    // 接收到 K230 花了2秒钟收集并滤波完毕的终极准确数据！
+                    last_D = d;
+                    last_H = h;
+                    last_L = l;
+                    last_C = c;
+                    
+                    state = STATE_DISPLAY;
+                    display_ticks = 0;
+                    meas_timeout = 0;
 
-					UART1_SendString("RET_IDLE\n");
-					LED2_OFF();
-				}
-				else if (sscanf(rx_buf, "D:%f,H:%f", &d, &h) == 2)
-				{
-					last_D = d;
-					last_H = h;
-					last_L = 0.0f;
-					state = STATE_DISPLAY;
-					display_ticks = 0;
-					meas_timeout = 0;
+                    // 将稳定的最终结果死死锁在第 2 3 行
+                    int len = sprintf(display_buf, "D:%.1f H:%.1f", last_D, last_H);
+                    while (len < 16) display_buf[len++] = ' ';
+                    display_buf[16] = '\0';
+                    OLED_ShowString(2, 1, display_buf);
 
-					OLED_ShowString(1, 1, "State: RESULT   ");
-					sprintf(display_buf, "D: %.1f cm     ", last_D);
-					OLED_ShowString(2, 1, display_buf);
-					sprintf(display_buf, "H: %.1f cm     ", last_H);
-					OLED_ShowString(3, 1, display_buf);
-					sprintf(display_buf, "L: %.1f cm     ", last_L);
-					OLED_ShowString(4, 1, display_buf);
+                    const char* colors[] = {"NONE", "RED", "GREEN", "BLUE", "YELLOW", "BLACK", "WHITE", "PURPLE"};
+										int safe_c = (last_C >= 0 && last_C <= 7) ? last_C : 0; // 防止越界死机
+										len = sprintf(display_buf, "L:%.1f %s", last_L, colors[safe_c]);
+                    while (len < 16) display_buf[len++] = ' ';
+                    display_buf[16] = '\0';
+                    OLED_ShowString(3, 1, display_buf);
 
-					UART1_SendString("RET_IDLE\n");
-					LED2_OFF();
-				}
-			}
-		}
+                    OLED_ShowString(4, 1, "K2: Measure Agn ");
+                    UART1_SendString("RET_IDLE\n");
+                    LED2_OFF();
+                }
+            }
+        }
 
-		switch (state)
-		{
-		case STATE_IDLE:
-			if (key == 1)
-			{
-				UART1_SendString("CAL_START\n");
-				state = STATE_CALIBRATING;
-				cal_sample_count = 1;
-				OLED_ShowString(1, 1, "State: CALIBRAT ");
-				OLED_ShowString(2, 1, "50cm sampled    ");
-				OLED_ShowString(3, 1, "Next: 55cm      ");
-				OLED_ShowString(4, 1, "Done: 1/11      ");
-				LED1_ON();
-			}
-			break;
+        switch (state)
+        {
+        case STATE_IDLE:
+        case STATE_WAIT_MEAS:
+            if (key == 1)
+            {
+                // 发送 CAL_START，K230 瞬间就自动采集了 50cm 的第一张图！
+                UART1_SendString("CAL_START\n");
+                state = STATE_CALIBRATING;
+                cal_sample_count = 1; // 完美对齐：现在已经完成了 1 个点
+                
+                OLED_ShowString(2, 1, "50cm Sampled!   ");
+                OLED_ShowString(3, 1, "Next: 55cm      ");
+                OLED_ShowString(4, 1, "Done: 1/11      ");
+                LED1_ON();
+            }
+            else if (key == 2)
+            {
+                UART1_SendString("MEAS_START\n");
+                state = STATE_MEASURING;
+                meas_timeout = 0;
+                
+                OLED_ShowString(2, 1, "Measuring...    ");
+                OLED_ShowString(3, 1, "Wait 2 Seconds  ");
+                OLED_ShowString(4, 1, "                ");
+                LED2_ON();
+            }
+            break;
 
-		case STATE_CALIBRATING:
-			if (key == 1)
-			{
-				if (cal_sample_count < 11)
-				{
-					UART1_SendString("SAMPLE\n");
-					cal_sample_count++;
+        case STATE_CALIBRATING:
+            if (key == 1)
+            {
+                if (cal_sample_count < 11)
+                {
+                    UART1_SendString("SAMPLE\n");
+                    cal_sample_count++; // 比如第二次按，变成 2
 
-					if (cal_sample_count <= 11)
-					{
-						uint16_t dist = 50 + (cal_sample_count - 1) * 5;
-						sprintf(display_buf, "%dcm sampled    ", dist);
-						OLED_ShowString(2, 1, display_buf);
+                    if (cal_sample_count <= 11)
+                    {
+                        // 计算刚刚采样的距离：50 + (2-1)*5 = 55cm，绝对不会跳到60！
+                        uint16_t sampled_dist = 50 + (cal_sample_count - 1) * 5;
+                        sprintf(display_buf, "%dcm Sampled!   ", sampled_dist);
+                        OLED_ShowString(2, 1, display_buf);
 
-						if (cal_sample_count < 11)
-						{
-							uint16_t next = dist + 5;
-							sprintf(display_buf, "Next: %dcm      ", next);
-							OLED_ShowString(3, 1, display_buf);
-							//Delay_ms(200);
-						}
-						else
-						{
-							OLED_ShowString(3, 1, "All points done ");
-						}
+                        if (cal_sample_count < 11)
+                        {
+                            uint16_t next_dist = sampled_dist + 5;
+                            sprintf(display_buf, "Next: %dcm      ", next_dist);
+                            OLED_ShowString(3, 1, display_buf);
+                        }
+                        else
+                        {
+                            OLED_ShowString(3, 1, "All points done ");
+                        }
 
-						sprintf(display_buf, "Done: %d/11     ", cal_sample_count);
-						OLED_ShowString(4, 1, display_buf);
-					}
-				}
+                        sprintf(display_buf, "Done: %d/11     ", cal_sample_count);
+                        OLED_ShowString(4, 1, display_buf);
+                    }
+                }
 
-				if (cal_sample_count >= 11)
-				{
-					OLED_ShowString(2, 1, "Computing...    ");
-					OLED_ShowString(3, 1, "Saving coeffs   ");
-					OLED_ShowString(4, 1, "                ");
-					Delay_ms(500);
-					UART1_SendString("CAL_END\n");
-					state = STATE_WAIT_MEAS;
-					cal_sample_count = 0;
-					OLED_ShowString(1, 1, "State: WAITING  ");
-					OLED_ShowString(2, 1, "KEY2: Measure   ");
-					OLED_ShowString(3, 1, "                ");
-					OLED_ShowString(4, 1, "                ");
-					LED1_OFF();
-				}
-			}
-			break;
+                if (cal_sample_count >= 11)
+                {
+                    OLED_ShowString(2, 1, "Computing...    ");
+                    OLED_ShowString(3, 1, "Saving coeffs   ");
+                    OLED_ShowString(4, 1, "                ");
+                    Delay_ms(500); // 留给文件保存的时间
+                    
+                    UART1_SendString("CAL_END\n");
+                    state = STATE_WAIT_MEAS;
+                    cal_sample_count = 0;
+                    
+                    OLED_ShowString(2, 1, "K1: Calibrate   ");
+                    OLED_ShowString(3, 1, "K2: Measure     ");
+                    OLED_ShowString(4, 1, "Cal complete!   ");
+                    LED1_OFF();
+                }
+            }
+            break;
 
-		case STATE_WAIT_MEAS:
-			if (key == 2)
-			{
-				UART1_SendString("MEAS_START\n");
-				state = STATE_MEASURING;
-				meas_timeout = 0;
-				OLED_ShowString(1, 1, "State: MEASURNG ");
-				OLED_ShowString(2, 1, "Measuring...    ");
-				OLED_ShowString(3, 1, "                ");
-				OLED_ShowString(4, 1, "                ");
-				LED2_ON();
-			}
-			break;
+        case STATE_MEASURING:
+            meas_timeout++;
+            // 超时时间放到 15 秒 (150*100ms)，给足 K230 拍 10 帧做滤波的时间
+            if (meas_timeout > 150)
+            {
+                state = STATE_WAIT_MEAS;
+                OLED_ShowString(2, 1, "K1: Calibrate   ");
+                OLED_ShowString(3, 1, "Timeout!        ");
+                OLED_ShowString(4, 1, "K2: Retry       ");
+                LED2_OFF();
+            }
+            break;
 
-		case STATE_MEASURING:
-			meas_timeout++;
-			if (meas_timeout > 100)
-			{
-				state = STATE_WAIT_MEAS;
-				OLED_ShowString(1, 1, "State: WAITING  ");
-				OLED_ShowString(2, 1, "Timeout!        ");
-				OLED_ShowString(3, 1, "                ");
-				OLED_ShowString(4, 1, "                ");
-				LED2_OFF();
-			}
-			break;
+        case STATE_DISPLAY:
+            display_ticks++;
+            // 结果保持显示，直到再次按下 K2 或者 15秒 后返回待机界面
+            if (key == 2 || display_ticks > 150)
+            {
+                // 如果是手动按的 K2，直接无缝开启下一次测量
+                if (key == 2) {
+                    UART1_SendString("MEAS_START\n");
+                    state = STATE_MEASURING;
+                    meas_timeout = 0;
+                    OLED_ShowString(2, 1, "Measuring...    ");
+                    OLED_ShowString(3, 1, "Wait 2 Seconds  ");
+                    OLED_ShowString(4, 1, "                ");
+                    LED2_ON();
+                } else {
+                    state = STATE_WAIT_MEAS;
+                    OLED_ShowString(2, 1, "K1: Calibrate   ");
+                    OLED_ShowString(3, 1, "K2: Measure     ");
+                    OLED_ShowString(4, 1, "                ");
+                }
+            }
+            break;
+        }
 
-		case STATE_DISPLAY:
-			display_ticks++;
-			if (key == 2 || display_ticks > 100)
-			{
-				state = STATE_WAIT_MEAS;
-				OLED_ShowString(1, 1, "State: WAITING  ");
-				OLED_ShowString(2, 1, "KEY2: Measure   ");
-				OLED_ShowString(3, 1, "                ");
-				OLED_ShowString(4, 1, "                ");
-			}
-			break;
-		}
-
-		Delay_ms(100);
-	}
+        // 主循环 10Hz，完美配合 20帧(2秒) 环形滤波
+        Delay_ms(100);
+    }
 }
