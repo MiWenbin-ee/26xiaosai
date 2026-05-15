@@ -21,7 +21,7 @@ int main(void)
 	uint8_t key;
 	char rx_buf[32];
 	char display_buf[24];
-	float last_D = 0.0f, last_H = 0.0f;
+	float last_D = 0.0f, last_H = 0.0f, last_L = 0.0f;
 	uint16_t display_ticks = 0;
 	uint16_t meas_timeout = 0;
 	uint8_t cal_sample_count = 0;
@@ -54,11 +54,12 @@ int main(void)
 
 			if (state == STATE_MEASURING)
 			{
-				float d, h;
-				if (sscanf(rx_buf, "D:%f,H:%f", &d, &h) == 2)
+				float d, h, l;
+				if (sscanf(rx_buf, "D:%f,H:%f,L:%f", &d, &h, &l) == 3)
 				{
 					last_D = d;
 					last_H = h;
+					last_L = l;
 					state = STATE_DISPLAY;
 					display_ticks = 0;
 					meas_timeout = 0;
@@ -68,7 +69,28 @@ int main(void)
 					OLED_ShowString(2, 1, display_buf);
 					sprintf(display_buf, "H: %.1f cm     ", last_H);
 					OLED_ShowString(3, 1, display_buf);
-					OLED_ShowString(4, 1, "KEY2: Next      ");
+					sprintf(display_buf, "L: %.1f cm     ", last_L);
+					OLED_ShowString(4, 1, display_buf);
+
+					UART1_SendString("RET_IDLE\n");
+					LED2_OFF();
+				}
+				else if (sscanf(rx_buf, "D:%f,H:%f", &d, &h) == 2)
+				{
+					last_D = d;
+					last_H = h;
+					last_L = 0.0f;
+					state = STATE_DISPLAY;
+					display_ticks = 0;
+					meas_timeout = 0;
+
+					OLED_ShowString(1, 1, "State: RESULT   ");
+					sprintf(display_buf, "D: %.1f cm     ", last_D);
+					OLED_ShowString(2, 1, display_buf);
+					sprintf(display_buf, "H: %.1f cm     ", last_H);
+					OLED_ShowString(3, 1, display_buf);
+					sprintf(display_buf, "L: %.1f cm     ", last_L);
+					OLED_ShowString(4, 1, display_buf);
 
 					UART1_SendString("RET_IDLE\n");
 					LED2_OFF();
@@ -111,6 +133,7 @@ int main(void)
 							uint16_t next = dist + 5;
 							sprintf(display_buf, "Next: %dcm      ", next);
 							OLED_ShowString(3, 1, display_buf);
+							//Delay_ms(200);
 						}
 						else
 						{
