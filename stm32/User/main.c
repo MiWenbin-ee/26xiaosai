@@ -49,18 +49,26 @@ static void OLED_ShowPowerLine(void)
     float avg_current = Get_Averaged_Current();
     float avg_power = 5.0f * avg_current;
 
-    int i_100 = (int)(avg_current * 100.0f + 0.5f);
-	int p_w = (int)avg_power;
-	int p_dw = (int)(avg_power * 10.0f + 0.5f) % 10;
+    // 1. 电流逻辑：整体放大100倍并四舍五入，拆分整数和2位小数
+    int i_total = (int)(avg_current * 100.0f + 0.5f);
+    int i_w = i_total / 100;    // 电流整数部分
+    int i_dw = i_total % 100;   // 电流两位小数部分
 
-	int len = sprintf(buf, "I:%d.%02dA P:%d.%dW",
-					i_100 / 100, i_100 % 100,
-					p_w, p_dw);
+    // 2. 功率逻辑：整体放大100倍并四舍五入，拆分整数和2位小数
+    int p_total = (int)(avg_power * 100.0f + 0.5f);
+    int p_w = p_total / 100;    // 功率整数部分
+    int p_dw = p_total % 100;   // 功率两位小数部分
+
+    // 3. 格式化打印：注意功率部分也改成了 %02d，保证类似 3.05W 时不会显示成 3.5W
+    int len = sprintf(buf, "I:%d.%02dA P:%d.%02dW",
+                    i_w, i_dw,
+                    p_w, p_dw);
+                    
+    // 4. 严格限制长度，防止 OLED 刷屏错位
     while (len < 16) buf[len++] = ' ';
     buf[16] = '\0';
     OLED_ShowString(1, 1, buf);
 }
-
 int main(void)
 {
     uint8_t state = STATE_IDLE;
