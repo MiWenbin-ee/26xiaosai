@@ -107,7 +107,27 @@ int main(void)
     {
         // 【核心】：不管板子在干嘛，第 1 行永远在实时刷新 2 秒平均功率！
         float cur_power = OLED_ShowPowerLine();
-        if (cur_power > max_power) max_power = cur_power;
+        
+        // 【修复】：检测到更大功率时，不仅更新变量，还要实时更新 OLED 第 4 行
+        if (cur_power > max_power) 
+        {
+            max_power = cur_power;
+            
+            // 只有在“测量中”或“结果保持显示”的状态下，才允许占用第 4 行实时显示 Pmax
+            if (state == STATE_MEASURING || state == STATE_DISPLAY)
+            {
+                int pm_total = (int)(max_power * 100.0f + 0.5f);
+                int pm_w = pm_total / 100;
+                int pm_dw = pm_total % 100;
+                char tmp_buf[24];
+                int len = sprintf(tmp_buf, "Pmax:%d.%02dW", pm_w, pm_dw);
+                
+                // 补齐空格防止残留字符
+                while (len < 16) tmp_buf[len++] = ' ';
+                tmp_buf[16] = '\0';
+                OLED_ShowString(4, 1, tmp_buf);
+            }
+        }
 
         key = Key_GetNum();
 
@@ -166,6 +186,7 @@ int main(void)
 
                     // ---------------------------------------------------------
                     // 第 4 行：显示 Pmax 最大功率 (保留 2 位小数)
+                    // (这一步主要为了接收到数据那一瞬间的对齐刷新)
                     // ---------------------------------------------------------
                     int pm_total = (int)(max_power * 100.0f + 0.5f);
                     int pm_w = pm_total / 100;
@@ -203,11 +224,14 @@ int main(void)
                 UART1_SendString("MEAS_START\n");
                 state = STATE_MEASURING;
                 meas_timeout = 0;
-                max_power = 0.0f; // 【修复】：每次开始测量清空历史最大功率
+                
+                // 【注意】：每次开始测量清空历史最大功率
+                // 并立刻在屏幕上刷新初始值，防止闪现旧的 Pmax
+                max_power = 0.0f; 
                 
                 OLED_ShowString(2, 1, "Measuring...    ");
                 OLED_ShowString(3, 1, "Wait 2 Seconds  ");
-                OLED_ShowString(4, 1, "                ");
+                OLED_ShowString(4, 1, "Pmax:0.00W      "); // 初始化测量中的第4行
                 LED2_ON();
             }
             break;
@@ -285,11 +309,11 @@ int main(void)
                     UART1_SendString("MEAS_START\n");
                     state = STATE_MEASURING;
                     meas_timeout = 0;
-                    max_power = 0.0f; // 【修复】：无缝重新测量时也要清空历史最大功率
+                    max_power = 0.0f; 
                     
                     OLED_ShowString(2, 1, "Measuring...    ");
                     OLED_ShowString(3, 1, "Wait 2 Seconds  ");
-                    OLED_ShowString(4, 1, "                ");
+                    OLED_ShowString(4, 1, "Pmax:0.00W      "); // 无缝重新测量也初始化第4行
                     LED2_ON();
                 } else {
                     state = STATE_WAIT_MEAS;
