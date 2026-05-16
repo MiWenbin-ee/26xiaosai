@@ -105,7 +105,7 @@ class SegmentationApp(AIBase):
 
     def compute_D(self, bottom_y):
         a, b, c, d = self.dist_a, self.dist_b, self.dist_c, self.dist_d
-        return a * (bottom_y ** 3) + b * (bottom_y ** 2) + c * bottom_y + d - self.REAL_BOTTLE_WIDTH/2.0
+        return a * (bottom_y ** 3) + b * (bottom_y ** 2) + c * bottom_y + d
 
     def compute_H(self, h_pixel, D_real):
         return h_pixel * D_real * self.k_H
@@ -449,15 +449,17 @@ class SegmentationApp(AIBase):
 
                     bottom_y = safe_y1 + safe_h
 
-                    d_surface = self.compute_D(bottom_y)
-                    self.history_D.append(d_surface)
+                    raw_poly_d = self.compute_D(bottom_y)
+                    self.history_D.append(raw_poly_d)
                     if len(self.history_D) > self.window_size: self.history_D.pop(0)
-                    avg_d_surface = sum(self.history_D) / len(self.history_D)
+                    avg_raw_d = sum(self.history_D) / len(self.history_D)
 
-                    final_H = self.compute_H(safe_h, avg_d_surface)
-                    physical_width = safe_w * avg_d_surface * self.k_W
-
-                    final_D = avg_d_surface + physical_width/2.0
+                    # 2. 提取所有瓶子通用的“前表面距离”
+                    # 多项式原本基于 6.5cm 宽的瓶子，所以表面距离永远是 拟合值 - 3.25
+                    d_surface = avg_raw_d - (self.REAL_BOTTLE_WIDTH / 2.0)
+                    final_H = self.compute_H(safe_h, avg_raw_d)
+                    physical_width = safe_w * avg_raw_d * self.k_W
+                    final_D = d_surface + (physical_width / 2.0)
 
                     pl.osd_img.draw_rectangle(safe_x1, safe_y1, safe_w, safe_h, color=(255, 0, 255, 0), thickness=3)
                     draw_y = max(0, safe_y1 - 30)
@@ -467,16 +469,31 @@ class SegmentationApp(AIBase):
                     color_id = 0
 
                     try:
+                        import time
+                        # 1. 记录算法开始时间
+                        t_start = time.ticks_ms()
+
                         liquid_y = self.measure_liquid_level(img, safe_x1, safe_y1, safe_w, safe_h)
                         liquid_ratio = ((safe_y1 + safe_h) - liquid_y) / float(safe_h) if safe_h > 0 else 0
                         final_L = final_H * liquid_ratio
 
                         color_id = self.recognize_color(img, safe_x1, safe_y1, safe_w, safe_h, liquid_y)
 
+                        # 2. 记录算法结束时间并计算差值
+                        t_end = time.ticks_ms()
+                        algo_time = time.ticks_diff(t_end, t_start)
+
+                        # 3. 把耗时和宽高直接画在屏幕上（红色大字，放在目标框上方一点）
+                        time_text = "TIME: %d ms (W:%d H:%d)" % (algo_time, safe_w, safe_h)
+                        pl.osd_img.draw_string_advanced(safe_x1, max(0, safe_y1 - 60), 30, time_text, color=(255, 0, 0, 255))
+
                         pl.osd_img.draw_line(safe_x1, liquid_y, safe_x1 + safe_w, liquid_y, color=(255, 0, 0, 255), thickness=3)
                         pl.osd_img.draw_circle(safe_x1 + safe_w // 2, bottom_y, 8, color=(255, 255, 0, 0), thickness=2, fill=True)
+
                     except Exception as e:
                         print("Liquid Level Scan Error:", e)
+                        # 如果发生异常，也把报错信息直接拍在屏幕左上角！
+                        pl.osd_img.draw_string_advanced(10, 10, 35, "ERR: " + str(e), color=(255, 0, 0, 255))
 
                     COLOR_NAMES = {0:"NONE", 1:"RED", 2:"GREEN", 3:"BLUE", 4:"YELLOW", 5:"BLACK", 6:"WHITE", 7:"PURPLE"}
                     color_str = COLOR_NAMES.get(color_id, "UNK")

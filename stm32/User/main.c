@@ -47,10 +47,15 @@ static void OLED_ShowPowerLine(void)
 {
     char buf[17];
     float avg_current = Get_Averaged_Current();
-    float avg_power = 5.0f * avg_current; // 假设系统为 5V 供电
-    
-    int len = sprintf(buf, "I:%.2fA P:%.1fW", avg_current, avg_power);
-    // 补齐空格，彻底清除上一帧的残影
+    float avg_power = 5.0f * avg_current;
+
+    int i_100 = (int)(avg_current * 100.0f + 0.5f);
+	int p_w = (int)avg_power;
+	int p_dw = (int)(avg_power * 10.0f + 0.5f) % 10;
+
+	int len = sprintf(buf, "I:%d.%02dA P:%d.%dW",
+					i_100 / 100, i_100 % 100,
+					p_w, p_dw);
     while (len < 16) buf[len++] = ' ';
     buf[16] = '\0';
     OLED_ShowString(1, 1, buf);
@@ -76,7 +81,6 @@ int main(void)
     LED_Init();
     Key_Init();
     ADCDMA_Init();
-    ADC_Pot_Init();
     UART1_Init(115200);
 
     LED1_OFF();
@@ -117,14 +121,20 @@ int main(void)
                     meas_timeout = 0;
 
                     // 将稳定的最终结果死死锁在第 2 3 行
-                    int len = sprintf(display_buf, "D:%.1f H:%.1f", last_D, last_H);
+                    int d_w = (int)last_D;
+                    int d_f = (int)((last_D - d_w) * 10.0f + 0.5f);
+                    int h_w = (int)last_H;
+                    int h_f = (int)((last_H - h_w) * 10.0f + 0.5f);
+                    int len = sprintf(display_buf, "D:%d.%d H:%d.%d", d_w, d_f, h_w, h_f);
                     while (len < 16) display_buf[len++] = ' ';
                     display_buf[16] = '\0';
                     OLED_ShowString(2, 1, display_buf);
 
                     const char* colors[] = {"NONE", "RED", "GREEN", "BLUE", "YELLOW", "BLACK", "WHITE", "PURPLE"};
-										int safe_c = (last_C >= 0 && last_C <= 7) ? last_C : 0; // 防止越界死机
-										len = sprintf(display_buf, "L:%.1f %s", last_L, colors[safe_c]);
+                    int safe_c = (last_C >= 0 && last_C <= 7) ? last_C : 0;
+                    int l_w = (int)last_L;
+                    int l_f = (int)((last_L - l_w) * 10.0f + 0.5f);
+                    len = sprintf(display_buf, "L:%d.%d %s", l_w, l_f, colors[safe_c]);
                     while (len < 16) display_buf[len++] = ' ';
                     display_buf[16] = '\0';
                     OLED_ShowString(3, 1, display_buf);
