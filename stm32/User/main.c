@@ -42,24 +42,24 @@ float Get_Averaged_Current(void)
     return sum / current_filled;
 }
 
-// 刷新第一行：实时动态显示 2 秒平滑后的电流与功率
-static void OLED_ShowPowerLine(void)
+// 刷新第一行：实时动态显示 2 秒平滑后的电流与功率 (保留2位小数)
+static float OLED_ShowPowerLine(void)
 {
     char buf[17];
     float avg_current = Get_Averaged_Current();
     float avg_power = 5.0f * avg_current;
 
-    // 1. 电流逻辑：整体放大100倍并四舍五入，拆分整数和2位小数
+    // 1. 电流逻辑：整体放大100倍并四舍五入，保留2位小数
     int i_total = (int)(avg_current * 100.0f + 0.5f);
     int i_w = i_total / 100;    // 电流整数部分
     int i_dw = i_total % 100;   // 电流两位小数部分
 
-    // 2. 功率逻辑：整体放大100倍并四舍五入，拆分整数和2位小数
+    // 2. 功率逻辑：整体放大100倍并四舍五入，保留2位小数
     int p_total = (int)(avg_power * 100.0f + 0.5f);
     int p_w = p_total / 100;    // 功率整数部分
     int p_dw = p_total % 100;   // 功率两位小数部分
 
-    // 3. 格式化打印：注意功率部分也改成了 %02d，保证类似 3.05W 时不会显示成 3.5W
+    // 3. 格式化打印：使用 %02d 保证个位数小数时补零
     int len = sprintf(buf, "I:%d.%02dA P:%d.%02dW",
                     i_w, i_dw,
                     p_w, p_dw);
@@ -68,7 +68,10 @@ static void OLED_ShowPowerLine(void)
     while (len < 16) buf[len++] = ' ';
     buf[16] = '\0';
     OLED_ShowString(1, 1, buf);
+    
+    return avg_power;
 }
+
 int main(void)
 {
     uint8_t state = STATE_IDLE;
@@ -78,6 +81,7 @@ int main(void)
     
     float last_D = 0.0f, last_H = 0.0f, last_L = 0.0f;
     int last_C = 0;
+    float max_power = 0.0f;
     
     uint16_t display_ticks = 0;
     uint16_t meas_timeout = 0;
@@ -102,7 +106,8 @@ int main(void)
     while (1)
     {
         // 【核心】：不管板子在干嘛，第 1 行永远在实时刷新 2 秒平均功率！
-        OLED_ShowPowerLine();
+        float cur_power = OLED_ShowPowerLine();
+        if (cur_power > max_power) max_power = cur_power;
 
         key = Key_GetNum();
 
@@ -128,26 +133,49 @@ int main(void)
                     display_ticks = 0;
                     meas_timeout = 0;
 
-                    // 将稳定的最终结果死死锁在第 2 3 行
-                    int d_w = (int)last_D;
-                    int d_f = (int)((last_D - d_w) * 10.0f + 0.5f);
-                    int h_w = (int)last_H;
-                    int h_f = (int)((last_H - h_w) * 10.0f + 0.5f);
+                    // ---------------------------------------------------------
+                    // 第 2 行：显示 D 和 H (保留 1 位小数)
+                    // ---------------------------------------------------------
+                    int d_total = (int)(last_D * 10.0f + 0.5f);
+                    int d_w = d_total / 10;
+                    int d_f = d_total % 10;
+                    
+                    int h_total = (int)(last_H * 10.0f + 0.5f);
+                    int h_w = h_total / 10;
+                    int h_f = h_total % 10;
+                    
                     int len = sprintf(display_buf, "D:%d.%d H:%d.%d", d_w, d_f, h_w, h_f);
                     while (len < 16) display_buf[len++] = ' ';
                     display_buf[16] = '\0';
                     OLED_ShowString(2, 1, display_buf);
 
+                    // ---------------------------------------------------------
+                    // 第 3 行：显示 L (保留 1 位小数) 和 颜色识别
+                    // ---------------------------------------------------------
                     const char* colors[] = {"NONE", "RED", "GREEN", "BLUE", "YELLOW", "BLACK", "WHITE", "PURPLE"};
                     int safe_c = (last_C >= 0 && last_C <= 7) ? last_C : 0;
-                    int l_w = (int)last_L;
-                    int l_f = (int)((last_L - l_w) * 10.0f + 0.5f);
+                    
+                    int l_total = (int)(last_L * 10.0f + 0.5f);
+                    int l_w = l_total / 10;
+                    int l_f = l_total % 10;
+                    
                     len = sprintf(display_buf, "L:%d.%d %s", l_w, l_f, colors[safe_c]);
                     while (len < 16) display_buf[len++] = ' ';
                     display_buf[16] = '\0';
                     OLED_ShowString(3, 1, display_buf);
 
-                    OLED_ShowString(4, 1, "K2: Measure Agn ");
+                    // ---------------------------------------------------------
+                    // 第 4 行：显示 Pmax 最大功率 (保留 2 位小数)
+                    // ---------------------------------------------------------
+                    int pm_total = (int)(max_power * 100.0f + 0.5f);
+                    int pm_w = pm_total / 100;
+                    int pm_dw = pm_total % 100;
+                    
+                    len = sprintf(display_buf, "Pmax:%d.%02dW", pm_w, pm_dw);
+                    while (len < 16) display_buf[len++] = ' ';
+                    display_buf[16] = '\0';
+                    OLED_ShowString(4, 1, display_buf);
+                    
                     UART1_SendString("RET_IDLE\n");
                     LED2_OFF();
                 }
@@ -175,6 +203,7 @@ int main(void)
                 UART1_SendString("MEAS_START\n");
                 state = STATE_MEASURING;
                 meas_timeout = 0;
+                max_power = 0.0f; // 【修复】：每次开始测量清空历史最大功率
                 
                 OLED_ShowString(2, 1, "Measuring...    ");
                 OLED_ShowString(3, 1, "Wait 2 Seconds  ");
@@ -256,6 +285,8 @@ int main(void)
                     UART1_SendString("MEAS_START\n");
                     state = STATE_MEASURING;
                     meas_timeout = 0;
+                    max_power = 0.0f; // 【修复】：无缝重新测量时也要清空历史最大功率
+                    
                     OLED_ShowString(2, 1, "Measuring...    ");
                     OLED_ShowString(3, 1, "Wait 2 Seconds  ");
                     OLED_ShowString(4, 1, "                ");
